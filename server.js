@@ -60,7 +60,7 @@ async function getFriends(userId) {
         });
 
         if (response.status === 429) {
-            await delay(1000); // delay before retrying
+            await delay(1000); // wait 1 second then retry
             return await getFriends(userId);
         }
 
@@ -81,70 +81,30 @@ async function findFriendPath(startUsername, endUsername, progressCallback) {
     const endUserId = await getUserId(endUsername);
     if (!startUserId || !endUserId) return null;
 
-    const queueStart = [[startUserId, [startUsername]]];
-    const queueEnd = [[endUserId, [endUsername]]];
-    const visitedStart = { [startUserId]: true };
-    const visitedEnd = { [endUserId]: true };
-    const userIdToName = { [startUserId]: startUsername, [endUserId]: endUsername };
-
+    const queue = [[startUserId, [startUsername]]];
+    const visited = { [startUserId]: true };
+    const userIdToName = { [startUserId]: startUsername };
     let checkedCount = 0;
 
-    while (queueStart.length > 0 && queueEnd.length > 0) {
-        // Expand from start side
-        const [currentStartId, pathStart] = queueStart.shift();
-        const currentStartUsername = pathStart[pathStart.length - 1];
-        console.log(`Checking start user: ${currentStartUsername} (${currentStartId})`);
-        checkedCount++;
-        if (progressCallback && checkedCount % 10 === 0) {
-            progressCallback(`Checked ${checkedCount} users so far...`);
-        }
+    while (queue.length > 0) {
+        const [currentUserId, path] = queue.shift();
+        const currentUsername = userIdToName[currentUserId];
+        if (progressCallback) progressCallback(currentUsername);
 
-        const friendsStart = await getFriends(currentStartId);
-        friendsStart.forEach(f => { userIdToName[f.id] = f.name; });
+        const friends = await getFriends(currentUserId);
+        friends.forEach(f => { userIdToName[f.id] = f.name; });
 
-        for (const friend of friendsStart) {
-            if (!visitedStart[friend.id]) {
-                const newPath = [...pathStart, friend.name];
-                if (visitedEnd[friend.id]) {
-                    // Found connection from both sides
-                    const pathFromEnd = queueEnd.find(q => q[0] === friend.id)?.[1] || [];
-                    const fullPath = [...newPath, ...pathFromEnd.slice(0, -1).reverse()];
-                    return fullPath;
-                }
-                visitedStart[friend.id] = true;
-                queueStart.push([friend.id, newPath]);
+        for (const friend of friends) {
+            if (!visited[friend.id]) {
+                const newPath = [...path, friend.name];
+                if (friend.id === endUserId) return newPath;
+                visited[friend.id] = true;
+                queue.push([friend.id, newPath]);
             }
         }
 
-        // Expand from end side
-        const [currentEndId, pathEnd] = queueEnd.shift();
-        const currentEndUsername = pathEnd[pathEnd.length - 1];
-        console.log(`Checking end user: ${currentEndUsername} (${currentEndId})`);
         checkedCount++;
-        if (progressCallback && checkedCount % 10 === 0) {
-            progressCallback(`Checked ${checkedCount} users so far...`);
-        }
-
-        const friendsEnd = await getFriends(currentEndId);
-        friendsEnd.forEach(f => { userIdToName[f.id] = f.name; });
-
-        for (const friend of friendsEnd) {
-            if (!visitedEnd[friend.id]) {
-                const newPath = [...pathEnd, friend.name];
-                if (visitedStart[friend.id]) {
-                    // Found connection from both sides
-                    const pathFromStart = queueStart.find(q => q[0] === friend.id)?.[1] || [];
-                    const fullPath = [...pathFromStart, ...newPath.slice(0, -1).reverse()];
-                    return fullPath;
-                }
-                visitedEnd[friend.id] = true;
-                queueEnd.push([friend.id, newPath]);
-            }
-        }
-
-        if (checkedCount > MAX_DEPTH) {
-            break; // avoid infinite or too long searches
-        }
+        if (checkedCount > MAX_DEPTH) break;
     }
 
     return null;
@@ -174,8 +134,8 @@ app.get('/friend-path', async (req, res) => {
 
     res.write(`<div class='progress'>Searching...<br></div><div class='path'></div>`);
 
-    const path = await findFriendPath(startUser, endUser, (progress) => {
-        res.write(`<p class='progress'>${progress}</p>`);
+    const path = await findFriendPath(startUser, endUser, (username) => {
+        res.write(`<p class='progress'>Checking: ${username}</p>`);
     });
 
     if (path) {
