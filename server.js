@@ -17,12 +17,13 @@ function delay(ms) {
 let activeRequests = 0;
 const MAX_PARALLEL = 5;
 const CACHE = new Map();
+const MAX_DEPTH = 1234;
 
 async function getUserId(username) {
     const response = await fetch('https://users.roblox.com/v1/usernames/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ usernames: [username], excludeBannedUsers: true })
+        body: JSON.stringify({ usernames: [username.toLowerCase()], excludeBannedUsers: true })
     });
     const data = await response.json();
     return data.data[0]?.id;
@@ -48,7 +49,7 @@ async function getFriends(userId) {
 
         const data = await response.json();
         if (!data?.data) return [];
-        const friends = data.data.map(friend => ({ id: friend.id, name: friend.name }));
+        const friends = data.data.slice(0, 1234).map(friend => ({ id: friend.id, name: friend.name }));
         CACHE.set(userId, friends);
         return friends;
     } catch (error) {
@@ -59,8 +60,8 @@ async function getFriends(userId) {
 }
 
 async function findFriendPath(startUsername, endUsername, progressCallback) {
-    const startUserId = await getUserId(startUsername.toLowerCase());
-    const endUserId = await getUserId(endUsername.toLowerCase());
+    const startUserId = await getUserId(startUsername);
+    const endUserId = await getUserId(endUsername);
     if (!startUserId || !endUserId) return null;
 
     const queue = [[startUserId, [startUsername]]];
