@@ -12,13 +12,17 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Cache friends per userId during one search
+const friendsCache = new Map();
+
 async function getUserId(username) {
+  username = username.toLowerCase();
   console.log(`Looking up user ID for username: "${username}"`);
   try {
     const response = await fetch('https://users.roblox.com/v1/usernames/users', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ usernames: [username.toLowerCase()], excludeBannedUsers: true }),
+      body: JSON.stringify({ usernames: [username], excludeBannedUsers: true }),
     });
     const data = await response.json();
     const id = data.data[0]?.id || null;
@@ -31,49 +35,37 @@ async function getUserId(username) {
 }
 
 async function getFriends(userId) {
+  if (friendsCache.has(userId)) {
+    return friendsCache.get(userId);
+  }
   console.log(`Fetching friends for user ID: ${userId}`);
-  let retries = 0;
-  const maxRetries = 5;
-
-  while (retries < maxRetries) {
-    try {
-      const response = await fetch(`https://friends.roblox.com/v1/users/${userId}/friends`, {
-        headers: { 'Cookie': `.ROBLOSECURITY=${ROBLOX_COOKIE}` },
-      });
-
-      if (response.status === 429) {
-        const waitTime = 1000 * (retries + 1); // 1s, 2s, 3s...
-        console.log(`429 Rate Limit hit. Waiting ${waitTime}ms and retrying...`);
-        await sleep(waitTime);
-        retries++;
-        continue;
-      }
-
-      if (!response.ok) {
-        console.log(`Failed to fetch friends for ${userId}: HTTP ${response.status}`);
-        return [];
-      }
-
-      const data = await response.json();
-      const friends = data.data.slice(0, 1000).map(f => ({ id: f.id, name: f.name }));
-      console.log(`Friends of ${userId}:`, friends.map(f => f.name));
-      await sleep(1000); // 1 second wait to reduce risk of 429
-      return friends;
-    } catch (err) {
-      console.log(`Error fetching friends for ${userId}:`, err);
+  try {
+    const response = await fetch(`https://friends.roblox.com/v1/users/${userId}/friends`, {
+      headers: { 'Cookie': `.ROBLOSECURITY=${ROBLOX_COOKIE}` },
+    });
+    if (!response.ok) {
+      console.log(`Failed to fetch friends for ${userId}: HTTP ${response.status}`);
       return [];
     }
+    const data = await response.json();
+    const friends = data.data.map(f => ({ id: f.id, name: f.name }));
+    console.log(`Friends of ${userId}:`, friends.map(f => f.name));
+    friendsCache.set(userId, friends);
+    return friends;
+  } catch (err) {
+    console.log(`Error fetching friends for ${userId}:`, err);
+    return [];
   }
-
-  console.log(`Exceeded retry limit for user ID ${userId}`);
-  return [];
 }
 
 async function findFriendPath(startUsername, endUsername) {
+  startUsername = startUsername.toLowerCase();
+  endUsername = endUsername.toLowerCase();
+
   console.log(`Starting search from "${startUsername}" to "${endUsername}"`);
 
-  const startUserId = await getUserId(startUsername.trim());
-  const endUserId = await getUserId(endUsername.trim());
+  const startUserId = await getUserId(startUsername);
+  const endUserId = await getUserId(endUsername);
 
   if (!startUserId) {
     console.log(`Start user "${startUsername}" not found.`);
@@ -86,8 +78,16 @@ async function findFriendPath(startUsername, endUsername) {
 
   console.log(`Start user ID: ${startUserId}, End user ID: ${endUserId}`);
 
+  // First: check direct friends shortcut
+  const startFriends = await getFriends(startUserId);
+  if (startFriends.find(f => f.id === endUserId)) {
+    console.log(`Direct friend path found: ${startUsername} → ${endUsername}`);
+    return [startUsername, endUsername];
+  }
+
+  // BFS setup
   const queue = [[startUserId, [startUsername]]];
-  const visited = { [startUserId]: true };
+  const visited = new Set([startUserId]);
   const userIdToName = { [startUserId]: startUsername };
 
   const MAX_DEPTH = 6;
@@ -102,16 +102,18 @@ async function findFriendPath(startUsername, endUsername) {
     }
 
     const friends = await getFriends(currentUserId);
-    friends.forEach(f => { userIdToName[f.id] = f.name; });
+    await sleep(1000); // Respect API rate limit
+
+    friends.forEach(f => { userIdToName[f.id] = f.name.toLowerCase(); });
 
     for (const friend of friends) {
-      if (!visited[friend.id]) {
+      if (!visited.has(friend.id)) {
         const newPath = [...path, friend.name];
         if (friend.id === endUserId) {
           console.log(`Path found! ${newPath.join(' → ')}`);
           return newPath;
         }
-        visited[friend.id] = true;
+        visited.add(friend.id);
         queue.push([friend.id, newPath]);
       }
     }
