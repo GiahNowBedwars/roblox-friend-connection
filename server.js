@@ -2,6 +2,7 @@
 const express = require('express');
 const fetch = require('node-fetch');
 const dotenv = require('dotenv');
+const fs = require('fs');
 dotenv.config();
 
 const app = express();
@@ -16,8 +17,24 @@ function delay(ms) {
 
 let activeRequests = 0;
 const MAX_PARALLEL = 5;
-const CACHE = new Map();
+const CACHE_FILE = './friendCache.json';
 const MAX_DEPTH = 1234;
+const FRIEND_LIMIT = 500;
+let CACHE = new Map();
+
+// Load cache from disk if available
+if (fs.existsSync(CACHE_FILE)) {
+    try {
+        const raw = fs.readFileSync(CACHE_FILE);
+        const parsed = JSON.parse(raw);
+        CACHE = new Map(parsed);
+    } catch (e) { console.error('Cache load error', e); }
+}
+
+// Save cache to disk every 60 seconds
+setInterval(() => {
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(Array.from(CACHE.entries())));
+}, 60000);
 
 async function getUserId(username) {
     const response = await fetch('https://users.roblox.com/v1/usernames/users', {
@@ -43,13 +60,13 @@ async function getFriends(userId) {
         });
 
         if (response.status === 429) {
-            await delay(1000);
+            await delay(1000); // delay before retrying
             return await getFriends(userId);
         }
 
         const data = await response.json();
         if (!data?.data) return [];
-        const friends = data.data.slice(0, 1234).map(friend => ({ id: friend.id, name: friend.name }));
+        const friends = data.data.slice(0, FRIEND_LIMIT).map(friend => ({ id: friend.id, name: friend.name }));
         CACHE.set(userId, friends);
         return friends;
     } catch (error) {
@@ -102,7 +119,7 @@ app.get('/friend-path', async (req, res) => {
             <input type='text' name='start' placeholder='Start Username' required>
             <input type='text' name='end' placeholder='End Username' required>
             <button type='submit'>Find Path</button>
-        </form><hr><div class='progress'>Finding path...</div><div class='path'></div>`);
+        </form><hr>`);
 
     const startUser = req.query.start?.trim() || '';
     const endUser = req.query.end?.trim() || '';
@@ -110,6 +127,8 @@ app.get('/friend-path', async (req, res) => {
         res.write(`<div class='path'><strong>Error:</strong> Missing usernames.</div>`);
         return res.end('</body></html>');
     }
+
+    res.write(`<div class='progress'>Searching...<br></div><div class='path'></div>`);
 
     const path = await findFriendPath(startUser, endUser, (username) => {
         res.write(`<p class='progress'>Checking: ${username}</p>`);
