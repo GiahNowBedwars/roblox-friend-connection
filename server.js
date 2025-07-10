@@ -21,6 +21,7 @@ const CACHE_FILE = './friendCache.json';
 const MAX_DEPTH = 1234;
 const FRIEND_LIMIT = 1000;
 let CACHE = new Map();
+let logCheckedUsers = [];
 
 // Load cache from disk if available
 if (fs.existsSync(CACHE_FILE)) {
@@ -32,9 +33,17 @@ if (fs.existsSync(CACHE_FILE)) {
 }
 
 // Save cache to disk every 60 seconds
-setInterval(() => {
+setInterval(() => {                                   
     fs.writeFileSync(CACHE_FILE, JSON.stringify(Array.from(CACHE.entries())));
 }, 60000);
+
+// Write checked users to a separate log file every 30 seconds
+setInterval(() => {
+    if (logCheckedUsers.length > 0) {
+        fs.appendFileSync('./checkedUsers.log', logCheckedUsers.join('\n') + '\n');
+        logCheckedUsers = [];
+    }
+}, 30000);
 
 async function getUserId(username) {
     const response = await fetch('https://users.roblox.com/v1/usernames/users', {
@@ -90,6 +99,7 @@ async function findFriendPath(startUsername, endUsername, progressCallback) {
         const [currentUserId, path] = queue.shift();
         const currentUsername = userIdToName[currentUserId];
         if (progressCallback) progressCallback(currentUsername);
+        logCheckedUsers.push(currentUsername);
 
         const friends = await getFriends(currentUserId);
         friends.forEach(f => { userIdToName[f.id] = f.name; });
@@ -132,10 +142,15 @@ app.get('/friend-path', async (req, res) => {
         return res.end('</body></html>');
     }
 
+    let startTime = Date.now();
+    let count = 0;
+
     res.write(`<div class='progress'>Searching...<br></div><div class='path'></div>`);
 
     const path = await findFriendPath(startUser, endUser, (username) => {
-        res.write(`<p class='progress'>Checking: ${username}</p>`);
+        count++;
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        res.write(`<p class='progress'>Checked ${count} users in ${elapsed}s. Now checking: ${username}</p>`);
     });
 
     if (path) {
