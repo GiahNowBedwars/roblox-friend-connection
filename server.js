@@ -1,199 +1,161 @@
-// server.js
 const express = require('express');
 const fetch = require('node-fetch');
-const dotenv = require('dotenv');
-const fs = require('fs');
-dotenv.config();
-
 const app = express();
-const PORT = process.env.PORT || 3000;
+
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+require('dotenv').config();
+
 const ROBLOX_COOKIE = process.env.ROBLOX_COOKIE;
 
-app.use(express.static('public'));
-
-function delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
-
-let activeRequests = 0;
-const MAX_PARALLEL = 5;
-const CACHE_FILE = './friendCache.json';
-const MAX_DEPTH = 1234;
-const FRIEND_LIMIT = 1000;
-let CACHE = new Map();
-let logCheckedUsers = [];
-
-// Load cache from disk if available
-if (fs.existsSync(CACHE_FILE)) {
-    try {
-        const raw = fs.readFileSync(CACHE_FILE);
-        const parsed = JSON.parse(raw);
-        CACHE = new Map(parsed);
-    } catch (e) { console.error('Cache load error', e); }
-}
-
-// Save cache to disk every 60 seconds
-setInterval(() => {                                   
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(Array.from(CACHE.entries())));
-}, 60000);
-
-// Write checked users to log file every 30 seconds
-setInterval(() => {
-    if (logCheckedUsers.length > 0) {
-        fs.appendFileSync('./checkedUsers.log', logCheckedUsers.join('\n') + '\n');
-        logCheckedUsers = [];
-    }
-}, 30000);
 
 async function getUserId(username) {
+  console.log(`Looking up user ID for username: "${username}"`);
+  try {
     const response = await fetch('https://users.roblox.com/v1/usernames/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ usernames: [username.toLowerCase()], excludeBannedUsers: true })
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ usernames: [username], excludeBannedUsers: true }),
     });
     const data = await response.json();
-    return data.data[0]?.id;
+    const id = data.data[0]?.id || null;
+    console.log(`User ID for "${username}": ${id}`);
+    return id;
+  } catch (err) {
+    console.log(`Error fetching user ID for "${username}":`, err);
+    return null;
+  }
 }
 
 async function getFriends(userId) {
-    if (CACHE.has(userId)) return CACHE.get(userId);
-
-    while (activeRequests >= MAX_PARALLEL) await delay(200);
-    activeRequests++;
-
-    try {
-        const response = await fetch(`https://friends.roblox.com/v1/users/${userId}/friends`, {
-            headers: { 'Cookie': `.ROBLOSECURITY=${ROBLOX_COOKIE}` }
-        });
-
-        if (response.status === 429) {
-            await delay(1000); // backoff on rate limit
-            return await getFriends(userId);
-        }
-
-        const data = await response.json();
-        if (!data?.data) return [];
-        const friends = data.data.slice(0, FRIEND_LIMIT).map(f => ({ id: f.id, name: f.name }));
-        CACHE.set(userId, friends);
-        return friends;
-    } catch (err) {
-        return [];
-    } finally {
-        activeRequests--;
+  console.log(`Fetching friends for user ID: ${userId}`);
+  try {
+    const response = await fetch(`https://friends.roblox.com/v1/users/${userId}/friends`, {
+      headers: { 'Cookie': `.ROBLOSECURITY=${ROBLOX_COOKIE}` },
+    });
+    if (!response.ok) {
+      console.log(`Failed to fetch friends for ${userId}: HTTP ${response.status}`);
+      return [];
     }
+    const data = await response.json();
+    console.log(`Friends of ${userId}:`, data.data.map(f => f.name));
+    return data.data.map(f => ({ id: f.id, name: f.name }));
+  } catch (err) {
+    console.log(`Error fetching friends for ${userId}:`, err);
+    return [];
+  }
 }
 
-async function findFriendPath(startUsername, endUsername, progressCallback) {
-    const startUserId = await getUserId(startUsername);
-    const endUserId = await getUserId(endUsername);
-    if (!startUserId || !endUserId) return null;
+async function findFriendPath(startUsername, endUsername) {
+  console.log(`Starting search from "${startUsername}" to "${endUsername}"`);
 
-    const startQueue = [[startUserId, [startUsername]]];
-    const endQueue = [[endUserId, [endUsername]]];
+  const startUserId = await getUserId(startUsername.trim());
+  const endUserId = await getUserId(endUsername.trim());
 
-    const visitedFromStart = { [startUserId]: [startUsername] };
-    const visitedFromEnd = { [endUserId]: [endUsername] };
-    const userIdToName = { [startUserId]: startUsername, [endUserId]: endUsername };
-
-    const startFriends = await getFriends(startUserId);
-    const endFriends = await getFriends(endUserId);
-
-    for (let sFriend of startFriends) {
-        if (endFriends.some(e => e.id === sFriend.id)) {
-            return [startUsername, sFriend.name, endUsername];
-        }
-    }
-
-    for (let f of startFriends) {
-        userIdToName[f.id] = f.name;
-        visitedFromStart[f.id] = [startUsername, f.name];
-        startQueue.push([f.id, [startUsername, f.name]]);
-    }
-
-    for (let f of endFriends) {
-        userIdToName[f.id] = f.name;
-        visitedFromEnd[f.id] = [endUsername, f.name];
-        endQueue.push([f.id, [endUsername, f.name]]);
-    }
-
-    while (startQueue.length > 0 && endQueue.length > 0) {
-        const expand = async (queue, visitedThis, visitedOther) => {
-            const [currentUserId, path] = queue.shift();
-            const currentUsername = userIdToName[currentUserId] || currentUserId;
-
-            progressCallback?.(currentUsername);
-            logCheckedUsers.push(currentUsername);
-            console.log(`Checking: ${currentUsername}`);
-
-            const friends = await getFriends(currentUserId);
-            for (let f of friends) userIdToName[f.id] = f.name;
-
-            for (let friend of friends) {
-                if (!visitedThis[friend.id]) {
-                    const newPath = [...path, friend.name];
-                    visitedThis[friend.id] = newPath;
-                    queue.push([friend.id, newPath]);
-
-                    if (visitedOther[friend.id]) {
-                        const otherPath = visitedOther[friend.id];
-                        return [...newPath.slice(0, -1), friend.name, ...otherPath.reverse().slice(1)];
-                    }
-                }
-            }
-            return null;
-        };
-
-        const resultFromStart = await expand(startQueue, visitedFromStart, visitedFromEnd);
-        if (resultFromStart) return resultFromStart;
-
-        const resultFromEnd = await expand(endQueue, visitedFromEnd, visitedFromStart);
-        if (resultFromEnd) return resultFromEnd;
-    }
-
+  if (!startUserId) {
+    console.log(`Start user "${startUsername}" not found.`);
     return null;
+  }
+  if (!endUserId) {
+    console.log(`End user "${endUsername}" not found.`);
+    return null;
+  }
+
+  console.log(`Start user ID: ${startUserId}, End user ID: ${endUserId}`);
+
+  const queue = [[startUserId, [startUsername]]];
+  const visited = { [startUserId]: true };
+  const userIdToName = { [startUserId]: startUsername };
+
+  const MAX_DEPTH = 6;
+
+  while (queue.length > 0) {
+    const [currentUserId, path] = queue.shift();
+    console.log(`Queue length: ${queue.length}. Checking user ID ${currentUserId} (${userIdToName[currentUserId]}) with path length ${path.length}`);
+
+    if (path.length > MAX_DEPTH) {
+      console.log(`Reached max depth of ${MAX_DEPTH}, skipping deeper search from here.`);
+      continue;
+    }
+
+    const friends = await getFriends(currentUserId);
+    await sleep(150); // small delay to reduce API rate limit issues
+
+    friends.forEach(f => { userIdToName[f.id] = f.name; });
+
+    for (const friend of friends) {
+      if (!visited[friend.id]) {
+        const newPath = [...path, friend.name];
+        if (friend.id === endUserId) {
+          console.log(`Path found! ${newPath.join(' → ')}`);
+          return newPath;
+        }
+        visited[friend.id] = true;
+        queue.push([friend.id, newPath]);
+      }
+    }
+  }
+
+  console.log('No friend path found between the given users.');
+  return null;
 }
 
-app.get('/friend-path', async (req, res) => {
-    res.writeHead(200, {
-        'Content-Type': 'text/html; charset=UTF-8',
-        'Transfer-Encoding': 'chunked'
-    });
+function renderForm(path, error, startUser = '', endUser = '') {
+  return `
+  <!DOCTYPE html>
+  <html>
+  <head>
+      <title>Roblox Friend Path Finder</title>
+      <style>
+          body { font-family: Arial, sans-serif; margin: 20px; }
+          .container { max-width: 600px; margin: auto; }
+          input[type=text] { width: 100%; padding: 8px; margin: 6px 0; box-sizing: border-box; }
+          button { padding: 10px 20px; font-size: 16px; }
+          .result { padding: 15px; border: 1px solid #ddd; border-radius: 5px; background: #f9f9f9; margin-top: 20px; }
+          .error { color: red; }
+      </style>
+  </head>
+  <body>
+      <div class="container">
+          <h2>Roblox Friend Path Finder</h2>
+          <form method="POST" action="/friend-path">
+              <label for="startUser">Start Username:</label>
+              <input type="text" id="startUser" name="startUser" value="${startUser}" required />
+              <label for="endUser">End Username:</label>
+              <input type="text" id="endUser" name="endUser" value="${endUser}" required />
+              <button type="submit">Find Path</button>
+          </form>
+          ${error ? `<p class="error">${error}</p>` : ''}
+          ${path ? `<div class="result"><strong>Path:</strong> ${path.join(' → ')}</div>` : ''}
+      </div>
+  </body>
+  </html>
+  `;
+}
 
-    res.write(`<!DOCTYPE html><html><head><title>Roblox Friend Path</title>
-        <style>body{font-family:sans-serif;padding:20px} .progress{color:#888} .path{margin-top:10px}</style>
-        </head><body><h2>Roblox Friend Path</h2>
-        <form method='get' action='/friend-path'>
-            <input type='text' name='start' placeholder='Start Username' required>
-            <input type='text' name='end' placeholder='End Username' required>
-            <button type='submit'>Find Path</button>
-        </form><hr>`);
-
-    const startUser = req.query.start?.trim() || '';
-    const endUser = req.query.end?.trim() || '';
-
-    if (!startUser || !endUser) {
-        res.write(`<div class='path'><strong>Error:</strong> Missing usernames.</div>`);
-        return res.end('</body></html>');
-    }
-
-    let count = 0;
-    let startTime = Date.now();
-    res.write(`<div class='progress'>Searching...<br></div><div class='path'></div>`);
-
-    const path = await findFriendPath(startUser, endUser, (username) => {
-        count++;
-        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-        res.write(`<p class='progress'>Checked ${count} users in ${elapsed}s. Now checking: ${username}</p>`);
-    });
-
-    if (path) {
-        res.write(`<script>history.replaceState({}, '', '/friend-path');</script>`);
-        res.write(`<div class='path'><strong>Path found:</strong> ${path.join(' → ')}</div>`);
-    } else {
-        res.write(`<div class='path'><strong>Error:</strong> No friend path found. Private profiles or rate limit issues.</div>`);
-    }
-
-    res.end('</body></html>');
+app.get('/friend-path', (req, res) => {
+  res.send(renderForm(null, null));
 });
 
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.post('/friend-path', async (req, res) => {
+  const { startUser, endUser } = req.body;
+  if (!startUser || !endUser) {
+    return res.send(renderForm(null, 'Both usernames are required.', startUser, endUser));
+  }
+  try {
+    const path = await findFriendPath(startUser.trim(), endUser.trim());
+    if (!path) {
+      return res.send(renderForm(null, 'No friend path found. Check usernames or privacy settings.', startUser, endUser));
+    }
+    res.send(renderForm(path, null, startUser, endUser));
+  } catch (err) {
+    console.log('Unexpected error:', err);
+    res.send(renderForm(null, 'An error occurred. Please try again.', startUser, endUser));
+  }
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Server running on port ${port}`));
