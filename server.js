@@ -90,31 +90,44 @@ async function findFriendPath(startUsername, endUsername, progressCallback) {
     const endUserId = await getUserId(endUsername);
     if (!startUserId || !endUserId) return null;
 
-    const queue = [[startUserId, [startUsername]]];
-    const visited = { [startUserId]: true };
-    const userIdToName = { [startUserId]: startUsername };
-    let checkedCount = 0;
+    const startQueue = [[startUserId, [startUsername]]];
+    const endQueue = [[endUserId, [endUsername]]];
 
-    while (queue.length > 0) {
-        const [currentUserId, path] = queue.shift();
-        const currentUsername = userIdToName[currentUserId];
-        if (progressCallback) progressCallback(currentUsername);
-        logCheckedUsers.push(currentUsername);
+    const visitedFromStart = { [startUserId]: [startUsername] };
+    const visitedFromEnd = { [endUserId]: [endUsername] };
 
-        const friends = await getFriends(currentUserId);
-        friends.forEach(f => { userIdToName[f.id] = f.name; });
+    const userIdToName = { [startUserId]: startUsername, [endUserId]: endUsername };
 
-        for (const friend of friends) {
-            if (!visited[friend.id]) {
-                const newPath = [...path, friend.name];
-                if (friend.id === endUserId) return newPath;
-                visited[friend.id] = true;
-                queue.push([friend.id, newPath]);
+    while (startQueue.length > 0 && endQueue.length > 0) {
+        const expand = async (queue, visitedFromThisSide, visitedFromOtherSide) => {
+            const [currentUserId, path] = queue.shift();
+            const currentUsername = userIdToName[currentUserId];
+            if (progressCallback) progressCallback(currentUsername);
+            logCheckedUsers.push(currentUsername);
+
+            const friends = await getFriends(currentUserId);
+            friends.forEach(f => { userIdToName[f.id] = f.name; });
+
+            for (const friend of friends) {
+                if (!visitedFromThisSide[friend.id]) {
+                    const newPath = [...path, friend.name];
+                    visitedFromThisSide[friend.id] = newPath;
+                    queue.push([friend.id, newPath]);
+
+                    if (visitedFromOtherSide[friend.id]) {
+                        const otherPath = visitedFromOtherSide[friend.id];
+                        return [...newPath.slice(0, -1), friend.name, ...otherPath.reverse().slice(1)];
+                    }
+                }
             }
-        }
+            return null;
+        };
 
-        checkedCount++;
-        if (checkedCount > MAX_DEPTH) break;
+        const pathFromStart = await expand(startQueue, visitedFromStart, visitedFromEnd);
+        if (pathFromStart) return pathFromStart;
+
+        const pathFromEnd = await expand(endQueue, visitedFromEnd, visitedFromStart);
+        if (pathFromEnd) return pathFromEnd;
     }
 
     return null;
