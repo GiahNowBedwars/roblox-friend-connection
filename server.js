@@ -2,63 +2,98 @@ const express = require('express');
 const fetch = require('node-fetch');
 const app = express();
 
-app.use(express.static('public'));
-app.use(express.urlencoded({ extended: true })); // to parse POST form data
+app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 require('dotenv').config();
+
 const ROBLOX_COOKIE = process.env.ROBLOX_COOKIE;
 
 async function getUserId(username) {
+    console.log(`Looking up user ID for username: "${username}"`);
     try {
         const response = await fetch('https://users.roblox.com/v1/usernames/users', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ usernames: [username], excludeBannedUsers: true })
+            body: JSON.stringify({ usernames: [username], excludeBannedUsers: true }),
         });
         const data = await response.json();
-        return data.data[0]?.id;
-    } catch (error) {
+        const id = data.data[0]?.id || null;
+        console.log(`User ID for "${username}": ${id}`);
+        return id;
+    } catch (err) {
+        console.log(`Error fetching user ID for "${username}":`, err);
         return null;
     }
 }
 
 async function getFriends(userId) {
+    console.log(`Fetching friends for user ID: ${userId}`);
     try {
         const response = await fetch(`https://friends.roblox.com/v1/users/${userId}/friends`, {
-            headers: { 'Cookie': `.ROBLOSECURITY=${ROBLOX_COOKIE}` }
+            headers: { 'Cookie': `.ROBLOSECURITY=${ROBLOX_COOKIE}` },
         });
+        if (!response.ok) {
+            console.log(`Failed to fetch friends for user ID ${userId}. Status: ${response.status}`);
+            return [];
+        }
         const data = await response.json();
-        if (response.status !== 200) return [];
-        return data.data.map(friend => ({ id: friend.id, name: friend.name }));
-    } catch (error) {
+        console.log(`Found ${data.data.length} friends for user ID ${userId}`);
+        return data.data.map(f => ({ id: f.id, name: f.name }));
+    } catch (err) {
+        console.log(`Error fetching friends for user ID ${userId}:`, err);
         return [];
     }
 }
 
 async function findFriendPath(startUsername, endUsername) {
-    const startUserId = await getUserId(startUsername);
-    const endUserId = await getUserId(endUsername);
-    if (!startUserId || !endUserId) return null;
+    console.log(`Starting search from "${startUsername}" to "${endUsername}"`);
+
+    const startUserId = await getUserId(startUsername.trim());
+    const endUserId = await getUserId(endUsername.trim());
+
+    if (!startUserId) {
+        console.log(`Start user "${startUsername}" not found.`);
+        return null;
+    }
+    if (!endUserId) {
+        console.log(`End user "${endUsername}" not found.`);
+        return null;
+    }
+
+    console.log(`Start user ID: ${startUserId}, End user ID: ${endUserId}`);
 
     const queue = [[startUserId, [startUsername]]];
     const visited = { [startUserId]: true };
     const userIdToName = { [startUserId]: startUsername };
 
+    const MAX_DEPTH = 6;
+
     while (queue.length > 0) {
         const [currentUserId, path] = queue.shift();
+        console.log(`Checking user ID ${currentUserId} (${userIdToName[currentUserId]}) with path length ${path.length}`);
+
+        if (path.length > MAX_DEPTH) {
+            console.log(`Reached max depth of ${MAX_DEPTH}, skipping deeper search from here.`);
+            continue;
+        }
+
         const friends = await getFriends(currentUserId);
         friends.forEach(f => { userIdToName[f.id] = f.name; });
 
         for (const friend of friends) {
             if (!visited[friend.id]) {
                 const newPath = [...path, friend.name];
-                if (friend.id === endUserId) return newPath;
+                if (friend.id === endUserId) {
+                    console.log(`Path found! ${newPath.join(' → ')}`);
+                    return newPath;
+                }
                 visited[friend.id] = true;
                 queue.push([friend.id, newPath]);
             }
         }
     }
 
+    console.log('No friend path found between the given users.');
     return null;
 }
 
@@ -96,7 +131,6 @@ function renderForm(path, error, startUser = '', endUser = '') {
 }
 
 app.get('/friend-path', (req, res) => {
-    // show form with no result initially
     res.send(renderForm(null, null));
 });
 
@@ -112,7 +146,8 @@ app.post('/friend-path', async (req, res) => {
         }
         res.send(renderForm(path, null, startUser, endUser));
     } catch (err) {
-        res.send(renderForm(null, 'Error occurred while searching. Please try again.', startUser, endUser));
+        console.log('Unexpected error:', err);
+        res.send(renderForm(null, 'An error occurred. Please try again.', startUser, endUser));
     }
 });
 
