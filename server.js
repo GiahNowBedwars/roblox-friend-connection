@@ -1,85 +1,66 @@
 const express = require('express');
 const fetch = require('node-fetch');
-const path = require('path');
-require('dotenv').config();
-
 const app = express();
-const ROBLOX_COOKIE = process.env.ROBLOX_COOKIE;
 
 app.use(express.static('public'));
-app.use(express.urlencoded({ extended: true }));
+require('dotenv').config();
+const ROBLOX_COOKIE = process.env.ROBLOX_COOKIE;
 
-// Helper function: sleep for rate limiting
-function delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// Fetch user ID from username
+// Get Roblox user ID from username
 async function getUserId(username) {
     try {
-        const res = await fetch('https://users.roblox.com/v1/usernames/users', {
+        const response = await fetch('https://users.roblox.com/v1/usernames/users', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ usernames: [username], excludeBannedUsers: true })
         });
-        const data = await res.json();
+        const data = await response.json();
         return data.data[0]?.id || null;
-    } catch (e) {
-        console.error('getUserId error:', e);
+    } catch (error) {
         return null;
     }
 }
 
-// Fetch friend list of a user ID
+// Get friends of a Roblox user by userId
 async function getFriends(userId) {
     try {
-        const res = await fetch(`https://friends.roblox.com/v1/users/${userId}/friends`, {
+        const response = await fetch(`https://friends.roblox.com/v1/users/${userId}/friends`, {
             headers: { 'Cookie': `.ROBLOSECURITY=${ROBLOX_COOKIE}` }
         });
-        if (res.status === 429) {
-            console.warn(`Rate limit hit while fetching ${userId}`);
-            await delay(1000); // wait 1s if rate limited
-            return await getFriends(userId); // retry once
+        if (response.status !== 200) {
+            console.log(`Failed to fetch friends for user ID ${userId}. Status: ${response.status}`);
+            return [];
         }
-        if (res.status !== 200) return [];
-        const data = await res.json();
+        const data = await response.json();
         return data.data.map(friend => ({ id: friend.id, name: friend.name }));
-    } catch (e) {
-        console.error(`Failed to get friends of ${userId}`, e);
+    } catch (error) {
+        console.log(`Error fetching friends for user ID ${userId}: ${error}`);
         return [];
     }
 }
 
-// Breadth-first search to find friend path
-async function findFriendPath(startUsername, endUsername, maxUsers = 1234) {
-    const startId = await getUserId(startUsername);
-    const endId = await getUserId(endUsername);
-    if (!startId || !endId) return null;
+// Find shortest friend path between two users using BFS
+async function findFriendPath(startUsername, endUsername) {
+    const startUserId = await getUserId(startUsername);
+    const endUserId = await getUserId(endUsername);
+    if (!startUserId || !endUserId) return null;
 
-    const queue = [[startId, [startUsername]]];
-    const visited = new Set([startId]);
-    const idToName = { [startId]: startUsername };
-    let processed = 0;
+    const queue = [[startUserId, [startUsername]]];
+    const visited = { [startUserId]: true };
+    const userIdToName = { [startUserId]: startUsername };
 
-    while (queue.length > 0 && processed < maxUsers) {
-        const [userId, path] = queue.shift();
-        console.log(`Checking user ID ${userId} (${idToName[userId]}) with path length ${path.length}`);
-        const friends = await getFriends(userId);
-        processed++;
-        await delay(1000); // 1 second between requests
+    while (queue.length > 0) {
+        const [currentUserId, path] = queue.shift();
+
+        const friends = await getFriends(currentUserId);
+        friends.forEach(f => { userIdToName[f.id] = f.name; });
 
         for (const friend of friends) {
-            const friendId = friend.id;
-            const friendName = friend.name;
-            idToName[friendId] = friendName;
-
-            if (!visited.has(friendId)) {
-                const newPath = [...path, friendName];
-                if (friendId === endId || friendName.toLowerCase() === endUsername.toLowerCase()) {
-                    return newPath;
-                }
-                visited.add(friendId);
-                queue.push([friendId, newPath]);
+            if (!visited[friend.id]) {
+                const newPath = [...path, friend.name];
+                if (friend.id === endUserId) return newPath;
+                visited[friend.id] = true;
+                queue.push([friend.id, newPath]);
             }
         }
     }
@@ -87,65 +68,60 @@ async function findFriendPath(startUsername, endUsername, maxUsers = 1234) {
     return null;
 }
 
-// Web form to input usernames
-app.get('/', (req, res) => {
-    res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Roblox Friend Path Finder</title>
-            <style>
-                body { font-family: sans-serif; padding: 20px; }
-                input, button { padding: 10px; font-size: 16px; }
-                .result { margin-top: 20px; background: #f0f0f0; padding: 15px; border-radius: 5px; }
-            </style>
-        </head>
-        <body>
-            <h2>Find Roblox Friend Path</h2>
-            <form action="/friend-path" method="GET">
-                <label>Start Username: <input type="text" name="start" required></label><br><br>
-                <label>End Username: <input type="text" name="end" required></label><br><br>
-                <button type="submit">Find Path</button>
-            </form>
-        </body>
-        </html>
-    `);
-});
-
-// Handle input and show result
 app.get('/friend-path', async (req, res) => {
-    const startUser = req.query.start;
-    const endUser = req.query.end;
+    const startUser = req.query.start || 'awesomelittleboy9292';
+    const endUser = req.query.end || 'Aaron_112s';
     const path = await findFriendPath(startUser, endUser);
 
     res.send(`
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Roblox Friend Path Result</title>
+            <title>Roblox Friend Path</title>
             <style>
-                body { font-family: sans-serif; padding: 20px; }
-                .path { background: #f9f9f9; padding: 15px; border-radius: 5px; border: 1px solid #ccc; }
-                a { text-decoration: none; color: blue; }
+                body { font-family: Arial, sans-serif; margin: 20px; }
+                .friend-path { padding: 15px; border: 1px solid #ddd; border-radius: 5px; background-color: #f9f9f9; max-width: 600px; }
+                .friend-path h3 { margin-top: 0; color: #333; }
+                .friend-path p { font-size: 16px; color: #555; }
+                form label { font-weight: bold; }
+                form input { margin-left: 5px; padding: 5px; }
+                form button { padding: 5px 10px; margin-left: 10px; }
             </style>
         </head>
         <body>
-            <a href="/">← Back</a>
-            <div class="path">
+            <div class="friend-path">
                 <h3>Roblox Friend Path</h3>
-                ${
-                  path
-                    ? `<p>${path.join(' → ')}</p>`
-                    : `<p>No path found between <strong>${startUser}</strong> and <strong>${endUser}</strong>. Try again or check privacy settings.</p>`
-                }
+
+                <form id="friendPathForm" style="margin-bottom:20px;">
+                    <label>
+                        Start Username:
+                        <input type="text" name="start" id="startInput" required value="${startUser}">
+                    </label>
+                    <label style="margin-left:10px;">
+                        End Username:
+                        <input type="text" name="end" id="endInput" required value="${endUser}">
+                    </label>
+                    <button type="submit">Find Path</button>
+                </form>
+
+                ${path ? `<p>${path.join(' → ')}</p>` : `<p style="color:red;">Error: No friend path found. Profiles may be private or rate-limited.</p>`}
             </div>
+
+            <script>
+                const form = document.getElementById('friendPathForm');
+                form.addEventListener('submit', function(e) {
+                    e.preventDefault();
+                    const start = document.getElementById('startInput').value.trim();
+                    const end = document.getElementById('endInput').value.trim();
+                    if (start && end) {
+                        window.location.href = \`/friend-path?start=\${encodeURIComponent(start)}&end=\${encodeURIComponent(end)}\`;
+                    }
+                });
+            </script>
         </body>
         </html>
     `);
 });
 
-// Start server
 const port = process.env.PORT || 3000;
-app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
-});
+app.listen(port, () => console.log(`Server running on port ${port}`));
