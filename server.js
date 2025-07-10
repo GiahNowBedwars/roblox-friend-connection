@@ -19,7 +19,7 @@ let activeRequests = 0;
 const MAX_PARALLEL = 5;
 const CACHE_FILE = './friendCache.json';
 const MAX_DEPTH = 1234;
-const FRIEND_LIMIT = 500;
+const FRIEND_LIMIT = 1000; // increased from 500
 let CACHE = new Map();
 
 // Load cache from disk if available
@@ -60,7 +60,7 @@ async function getFriends(userId) {
         });
 
         if (response.status === 429) {
-            await delay(1000); // delay before retrying
+            await delay(1000); // delay before retrying due to rate limit
             return await getFriends(userId);
         }
 
@@ -85,10 +85,34 @@ async function findFriendPath(startUsername, endUsername, progressCallback) {
     const visited = { [startUserId]: true };
     const userIdToName = { [startUserId]: startUsername };
 
+    let checkedUsersCount = 0;
+    const maxUsersToCheck = 20000; // safety limit to avoid infinite loop
+
+    const startTime = Date.now();
+
     while (queue.length > 0) {
+        if (checkedUsersCount >= maxUsersToCheck) {
+            break;
+        }
+
         const [currentUserId, path] = queue.shift();
         const currentUsername = userIdToName[currentUserId];
-        if (progressCallback) progressCallback(currentUsername);
+        checkedUsersCount++;
+
+        // Calculate ETA and progress
+        const elapsed = (Date.now() - startTime) / 1000; // seconds
+        const avgTimePerUser = elapsed / checkedUsersCount;
+        const usersLeft = maxUsersToCheck - checkedUsersCount;
+        const etaSeconds = Math.round(usersLeft * avgTimePerUser);
+        const progressPercent = Math.min(100, Math.round((checkedUsersCount / maxUsersToCheck) * 100));
+
+        if (progressCallback) progressCallback({
+            username: currentUsername,
+            checkedUsersCount,
+            maxUsersToCheck,
+            etaSeconds,
+            progressPercent
+        });
 
         const friends = await getFriends(currentUserId);
         friends.forEach(f => { userIdToName[f.id] = f.name; });
@@ -113,7 +137,18 @@ app.get('/friend-path', async (req, res) => {
     });
 
     res.write(`<!DOCTYPE html><html><head><title>Roblox Friend Path</title>
-        <style>body{font-family:sans-serif;padding:20px} .progress{color:#888} .path{margin-top:10px}</style>
+        <style>
+            body { font-family:sans-serif; padding:20px; }
+            .progress { color:#888; }
+            .path { margin-top:10px; }
+            #progressBarContainer {
+                width: 100%; background-color: #ddd; border-radius: 5px; margin-top: 10px;
+            }
+            #progressBar {
+                width: 0%; height: 20px; background-color: #4caf50; border-radius: 5px;
+                transition: width 0.3s ease;
+            }
+        </style>
         </head><body><h2>Roblox Friend Path</h2>
         <form method='get' action='/friend-path'>
             <input type='text' name='start' placeholder='Start Username' required>
@@ -128,17 +163,26 @@ app.get('/friend-path', async (req, res) => {
         return res.end('</body></html>');
     }
 
-    res.write(`<div class='progress'>Searching...<br></div><div class='path'></div>`);
+    res.write(`<div class='progress'>
+        Searching...<br>
+        <div id="progressBarContainer"><div id="progressBar"></div></div>
+        <div id="status">Checked: 0 / 0 | ETA: Calculating...</div>
+    </div><div class='path'></div>`);
 
-    const path = await findFriendPath(startUser, endUser, (username) => {
-        res.write(`<p class='progress'>Checking: ${username}</p>`);
+    const path = await findFriendPath(startUser, endUser, ({ username, checkedUsersCount, maxUsersToCheck, etaSeconds, progressPercent }) => {
+        // Escape any HTML in username to avoid injection
+        const safeUsername = username.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        res.write(`<script>
+            document.getElementById('status').innerText = 'Checking: ${safeUsername} | Checked: ${checkedUsersCount} / ${maxUsersToCheck} | ETA: ${etaSeconds}s';
+            document.getElementById('progressBar').style.width = '${progressPercent}%';
+        </script>`);
     });
 
     if (path) {
         res.write(`<script>history.replaceState({}, '', '/friend-path');</script>`);
         res.write(`<div class='path'><strong>Path found:</strong> ${path.join(' → ')}</div>`);
     } else {
-        res.write(`<div class='path'><strong>Error:</strong> No friend path found. Profiles may be private or rate limit reached.</div>`);
+        res.write(`<div class='path'><strong>Error:</strong> No friend path found or rate limit reached.</div>`);
     }
 
     res.end('</body></html>');
