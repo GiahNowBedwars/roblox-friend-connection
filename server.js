@@ -11,44 +11,50 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function getUserId(username) {
   const res = await fetch('https://users.roblox.com/v1/usernames/users', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({usernames:[username.toLowerCase()], excludeBannedUsers:true})
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ usernames: [username.toLowerCase()], excludeBannedUsers: true })
   });
   const d = await res.json();
   return d.data[0]?.id || null;
 }
 
-async function getUserProfile(userId) {
+async function getUserInfo(userId) {
   try {
-    const [avatarRes, profileRes] = await Promise.all([
-      fetch(`https://thumbnails.roblox.com/v1/users/avatar?userIds=${userId}&size=100x100&format=Png&isCircular=false`),
-      fetch(`https://users.roblox.com/v1/users/${userId}`)
-    ]);
-    const avatar = await avatarRes.json();
-    const profile = await profileRes.json();
-    return {
-      id: userId,
-      username: profile.name,
-      displayName: profile.displayName || profile.name,
-      avatar: avatar?.data?.[0]?.imageUrl || ''
-    };
-  } catch (e) {
-    return { id: userId, username: 'Unknown', displayName: 'Unknown', avatar: '' };
+    const res = await fetch(`https://users.roblox.com/v1/users/${userId}`);
+    const data = await res.json();
+    const avatar = await fetch(`https://thumbnails.roblox.com/v1/users/avatar?userIds=${userId}&size=100x100&format=Png&isCircular=true`);
+    const avatarData = await avatar.json();
+    const imageUrl = avatarData?.data?.[0]?.imageUrl || '';
+    return { id: userId, name: data.name, displayName: data.displayName, avatar: imageUrl };
+  } catch {
+    return { id: userId, name: '', displayName: '', avatar: '' };
   }
 }
 
-async function getFriends(userId) {
-  await sleep(1000);
+async function getFriends(userId, retry = 0) {
+  await sleep(1200); // Wait 1.2s to avoid 429
   const res = await fetch(`https://friends.roblox.com/v1/users/${userId}/friends`, {
     headers: { Cookie: `.ROBLOSECURITY=${COOKIE}` }
   });
+
   if (res.status === 429) {
-    console.log("Rate-limited, waiting...");
-    await sleep(2000);
-    return getFriends(userId);
+    if (retry >= 3) {
+      console.log(`Too many retries for ${userId}`);
+      return [];
+    }
+    const wait = 2000 + retry * 1000;
+    console.log(`429 received. Retrying in ${wait}ms...`);
+    await sleep(wait);
+    return getFriends(userId, retry + 1);
   }
-  const d = await res.json();
-  return (d.data || []).map(x => ({ id: x.id, name: x.name }));
+
+  try {
+    const d = await res.json();
+    return (d.data || []).map(x => ({ id: x.id, name: x.name }));
+  } catch {
+    return [];
+  }
 }
 
 app.get('/', (req, res) => {
@@ -62,52 +68,74 @@ app.get('/', (req, res) => {
 });
 
 app.post('/', async (req, res) => {
-  const s = req.body.s.trim(), e = req.body.e.trim();
-  const sid = await getUserId(s), eid = await getUserId(e);
-  if (!sid || !eid) return res.send("Invalid usernames");
+  const s = req.body.s.trim();
+  const e = req.body.e.trim();
+  const sid = await getUserId(s);
+  const eid = await getUserId(e);
 
-  const q1 = [[sid, [sid]]], q2 = [[eid, [eid]]];
-  const v1 = { [sid]: [sid] }, v2 = { [eid]: [eid] };
+  if (!sid || !eid) return res.send("Invalid usernames.");
+
+  const q1 = [[sid, [sid]]];
+  const q2 = [[eid, [eid]]];
+  const v1 = { [sid]: [sid] };
+  const v2 = { [eid]: [eid] };
 
   while (q1.length && q2.length) {
-    async function expand(q, me, other) {
+    async function expand(q, visited, otherSide) {
       const [uid, path] = q.shift();
       const friends = await getFriends(uid);
+
       for (const f of friends) {
-        if (!me[f.id]) {
-          me[f.id] = [...path, f.id];
-          q.push([f.id, me[f.id]]);
-          if (other[f.id]) return [f.id, me[f.id], other[f.id]];
+        if (!visited[f.id]) {
+          visited[f.id] = [...path, f.id];
+          q.push([f.id, visited[f.id]]);
+          if (otherSide[f.id]) return f.id;
         }
       }
     }
-    const res1 = await expand(q1, v1, v2);
-    if (res1) {
-      const [mid, p1, p2] = res1;
-      const fullPath = [...p1, ...p2.reverse().slice(1)];
-      return showPath(res, fullPath);
+
+    const m1 = await expand(q1, v1, v2);
+    if (m1) {
+      const full = [...v1[m1], ...v2[m1].slice().reverse().slice(1)];
+      const infos = await Promise.all(full.map(id => getUserInfo(id)));
+
+      const pathHtml = infos.map(info => `
+        <div style="display:inline-block;text-align:center;margin:10px;">
+          <img src="${info.avatar}" width="70" height="70" style="border-radius:50%"><br>
+          <strong>${info.displayName}</strong><br>
+          <small>@${info.name}</small>
+        </div>
+      `).join('<span style="font-size:30px;">→</span>');
+
+      return res.send(`
+        <h2>Friend Path Found</h2>
+        <div style="font-family:sans-serif;">${pathHtml}</div>
+        <br><a href="/">🔙 Back</a>
+      `);
     }
-    const res2 = await expand(q2, v2, q1);
-    if (res2) {
-      const [mid, p2, p1] = res2;
-      const fullPath = [...p1.reverse().slice(1), ...p2];
-      return showPath(res, fullPath);
+
+    const m2 = await expand(q2, v2, v1);
+    if (m2) {
+      const full = [...v1[m2], ...v2[m2].slice().reverse().slice(1)];
+      const infos = await Promise.all(full.map(id => getUserInfo(id)));
+
+      const pathHtml = infos.map(info => `
+        <div style="display:inline-block;text-align:center;margin:10px;">
+          <img src="${info.avatar}" width="70" height="70" style="border-radius:50%"><br>
+          <strong>${info.displayName}</strong><br>
+          <small>@${info.name}</small>
+        </div>
+      `).join('<span style="font-size:30px;">→</span>');
+
+      return res.send(`
+        <h2>Friend Path Found</h2>
+        <div style="font-family:sans-serif;">${pathHtml}</div>
+        <br><a href="/">🔙 Back</a>
+      `);
     }
   }
 
-  res.send("No path found");
+  res.send("❌ No friend path found.");
 });
-
-async function showPath(res, userIds) {
-  const profiles = await Promise.all(userIds.map(id => getUserProfile(id)));
-  const html = profiles.map(p => `
-    <div style="display:inline-block;text-align:center;margin:10px;">
-      <img src="${p.avatar}" width="100" height="100" style="border-radius:8px"><br>
-      <strong>${p.displayName}</strong><br>
-      <small>@${p.username}</small>
-    </div>
-  `).join('→');
-  res.send(`<h2>Friend Path</h2>${html}<br><br><a href="/">Find another path</a>`);
-}
 
 app.listen(process.env.PORT || 3000, () => console.log("Listening"));
